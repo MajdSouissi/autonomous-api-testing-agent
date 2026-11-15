@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  target_api:
+    build:
+      context: ..
+      dockerfile: benchmark_app/Dockerfile.target
+    container_name: target_api
+    ports:
+      - "8000:8000"
+    networks:
+      - test_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/openapi.json || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+
+  sandbox_runner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.sandbox
+    container_name: sandbox_runner
+    depends_on:
+      target_api:
+        condition: service_healthy
+    volumes:
+      - ../generated_tests:/tests
+      - ../reports:/reports
+    networks:
+      - test_net
+    environment:
+      - TARGET_API_URL=http://target_api:8000
+    profiles:
+      - runner
+
+networks:
+  test_net:
+    driver: bridge

@@ -1,0 +1,11 @@
+FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
+WORKDIR /tests
+RUN pip install --no-cache-dir \
+    pytest>=8.0.0 \
+    httpx>=0.27.0 \
+    pytest-playwright>=0.5.0 \
+    pytest-json-report>=1.5.0 \
+    pytest-xdist>=3.5.0 \
+    lxml
+ENV TARGET_API_URL=http://target_api:8000
+CMD ["pytest", "/tests", "--tb=short", "--json-report", "--json-report-file=/reports/report.json", "-v", "--ignore=/tests/reports"]

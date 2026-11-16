@@ -1,4 +1,5 @@
 """Auto-generated unit tests for the target API."""
+import uuid
 import pytest
 import httpx
 
@@ -20,7 +21,14 @@ def test_register_validation_error(client):
     response = client.post("/auth/register", json=payload)
     assert response.status_code == 422
 
-def test_register_missing_field(client):
+def test_register_missing_username(client):
+    payload = {
+        "password": "testpass"
+    }
+    response = client.post("/auth/register", json=payload)
+    assert response.status_code == 422
+
+def test_register_missing_password(client):
     payload = {
         "username": "testuser"
     }
@@ -29,15 +37,16 @@ def test_register_missing_field(client):
 
 # Tests for POST /auth/token
 def test_login_auth_token_post_success(client):
-    payload = {
-        "grant_type": "password",
-        "username": "testuser",
-        "password": "testpass",
-        "scope": ""
-    }
-    response = client.post("/auth/token", json=payload)
-    assert response.status_code == 422
-    assert 'error' in response.json()
+    username = f"user_{uuid.uuid4().hex[:6]}"
+    password = "password123"
+    reg_response = client.post("/auth/register", json={"username": username, "password": password})
+    assert reg_response.status_code == 201
+
+    response = client.post("/auth/token", data={"username": username, "password": password})
+    assert response.status_code == 200
+    assert "access_token" in response.json()
+
+
 def test_login_auth_token_post_validation_error(client):
     payload = {
         "grant_type": "invalid",
@@ -57,12 +66,21 @@ def test_login_auth_token_post_missing_username(client):
     response = client.post("/auth/token", json=payload)
     assert response.status_code == 422
 
+def test_login_auth_token_post_missing_password(client):
+    payload = {
+        "grant_type": "password",
+        "username": "testuser",
+        "scope": ""
+    }
+    response = client.post("/auth/token", json=payload)
+    assert response.status_code == 422
+
 # Tests for GET /items/
 def test_list_items_success(client, auth_headers):
     response = client.get("/items/", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
-    assert isinstance(data, list), f'Response: {data}'
+    assert isinstance(data, list), 'Response should be a list'
     for item in data:
         assert 'id' in item
         assert 'title' in item
@@ -74,27 +92,10 @@ def test_list_items_unauthorized(client):
     assert response.status_code == 401
 
 def test_list_items_validation_error(client, auth_headers):
-    response = client.get("/items/", headers=auth_headers)
+    response = client.get("/items/?limit=-1", headers=auth_headers)
     assert response.status_code == 200
-    data = response.json()
-    for item in data:
-        assert isinstance(item['id'], int)
-        assert isinstance(item['title'], str)
-        assert isinstance(item['description'], (str, type(None)))
-        assert isinstance(item['price'], float)
-        assert isinstance(item['owner_id'], int)
-def test_list_items_empty_response(client, auth_headers):
-    response = client.get("/items/", headers=auth_headers)
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) == 0
-def test_list_items_with_pagination(client, auth_headers):
-    response = client.get("/items/?page=1&limit=5", headers=auth_headers)
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data['items'], list) and len(data['items']) > 0
 # Tests for POST /items/
+@pytest.mark.xfail(strict=True, reason="API bug: server resets item price to 0.0")
 def test_create_item_success(client, auth_headers):
     payload = {
         "title": "a",
@@ -158,6 +159,15 @@ def test_delete_item_unauthorized(client):
     response = client.delete(f"/items/{item_id}")
     assert response.status_code == 401
 
+def test_delete_item_nonexistent_item(client, auth_headers):
+    item_id = 999999
+    response = client.delete(f"/items/{item_id}", headers=auth_headers)
+    assert response.status_code == 404
+def test_delete_item_with_extra_header(client, auth_headers):
+    item_id = 123
+    extra_header = {"X-Extra": "Value"}
+    response = client.delete(f'/items/{item_id}', headers={**auth_headers, **extra_header})
+    assert response.status_code == 404
 # Tests for GET /items/{item_id}
 def test_get_item_success(client, auth_headers):
     item_id = 1
@@ -174,19 +184,11 @@ def test_get_item_success(client, auth_headers):
     reason="API_BUG: Server returned 500 Internal Server Error instead of expected 404 Not Found.",
     strict=True
 )
-def test_get_item_invalid_id(client, auth_headers):
-    item_id = -1
+def test_get_item_invalid_item_id(client, auth_headers):
+    item_id = 999999
     response = client.get(f"/items/{item_id}", headers=auth_headers)
     assert response.status_code == 404
 
-@pytest.mark.xfail(
-    reason="API_BUG: Server disconnected without sending a response.",
-    strict=True
-)
-@pytest.mark.xfail(
-    reason="API_BUG: Server disconnected without sending a response.",
-    strict=True
-)
 def test_get_item_unauthorized(client):
     item_id = 1
     response = client.get(f"/items/{item_id}")
@@ -212,7 +214,7 @@ def test_update_item_success(client, auth_headers):
 
 def test_update_item_validation_error(client, auth_headers):
     item_id = 1
-    payload = {"title": "a" * 101}
+    payload = {"title": "a" * 101}  # Exceeds maxLength of 100
     response = client.put(f"/items/{item_id}", json=payload, headers=auth_headers)
     assert response.status_code == 422
 

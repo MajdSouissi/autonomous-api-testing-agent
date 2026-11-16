@@ -28,6 +28,8 @@ class EndpointInfo:
     request_body: Optional[dict]    # resolved request body schema (None if absent)
     responses: Dict[str, dict]      # status_code -> resolved response schema
     success_status_code: int        # primary success code (200 or 201)
+    content_type: str = "application/json"  # MIME type: application/json vs application/x-www-form-urlencoded
+    request_content_type: str = "application/json"
 
 
 # ---------------------------------------------------------------------------
@@ -174,17 +176,23 @@ def parse_spec(url: str) -> List[EndpointInfo]:
 
             # --- request body ---
             request_body: Optional[dict] = None
+            content_type: str = "application/json"
             if "requestBody" in operation:
                 rb = operation["requestBody"]
                 content = rb.get("content", {})
-                # Prefer application/json
-                for media_type in ("application/json", "application/x-www-form-urlencoded"):
-                    if media_type in content:
-                        request_body = content[media_type].get("schema")
-                        break
-                if request_body is None and content:
-                    first_media = next(iter(content.values()))
-                    request_body = first_media.get("schema")
+                if "application/x-www-form-urlencoded" in content:
+                    content_type = "application/x-www-form-urlencoded"
+                    request_body = content["application/x-www-form-urlencoded"].get("schema")
+                elif "application/json" in content:
+                    content_type = "application/json"
+                    request_body = content["application/json"].get("schema")
+                elif content:
+                    content_type = next(iter(content.keys()))
+                    request_body = content[content_type].get("schema")
+
+                # Explicitly flag content_type in the parsed schema dict
+                if isinstance(request_body, dict):
+                    request_body["content_type"] = content_type
 
             # --- responses ---
             responses: Dict[str, dict] = {}
@@ -221,6 +229,8 @@ def parse_spec(url: str) -> List[EndpointInfo]:
                     request_body=request_body,
                     responses=responses,
                     success_status_code=success_status_code,
+                    content_type=content_type,
+                    request_content_type=content_type,
                 )
             )
 

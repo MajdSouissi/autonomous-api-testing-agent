@@ -32,6 +32,8 @@ class AgentState(TypedDict):
     all_passed: bool
     bug_reports: List[Dict[str, Any]]           # API_BUG entries
     metrics: Dict[str, Any]
+    zero_shot_passed: Optional[int]
+    zero_shot_total: Optional[int]
     
     # Control flow
     error: Optional[str]

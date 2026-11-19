@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-11-16T14:41:15.433671",
-  "total_tests": 29,
-  "passed": 22,
-  "failed": 5,
+  "timestamp": "2026-11-19T10:29:20.208789",
+  "total_tests": 34,
+  "passed": 28,
+  "failed": 3,
   "xfailed_api_bugs": 2,
-  "zero_shot_pass_rate": 0.414,
-  "post_healing_pass_rate": 0.828,
+  "zero_shot_pass_rate": 0.647,
+  "post_healing_pass_rate": 0.882,
   "api_bugs_caught": 2,
   "healing_iterations": 3
 }

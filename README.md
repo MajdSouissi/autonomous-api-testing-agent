@@ -11,13 +11,13 @@ The agent ingests any target application's OpenAPI specification (`openapi.json`
 - **Strict Black-Box Boundary:** The agent never inspects target source code. It relies exclusively on OpenAPI schemas, runtime HTTP status codes, and execution tracebacks.
 - **Deterministic AST & Schema Resolution:** 
   - Resolves `$ref` schemas recursively to prevent LLM hallucinations.
-  - Automatically identifies endpoint content types (e.g., distinguishing JSON endpoints from OAuth2 `application/x-www-form-urlencoded` forms).
+  - Automatically identifies endpoint content types (e.g., distinguishing standard JSON endpoints from OAuth2 `application/x-www-form-urlencoded` forms).
   - Validates generated Python syntax via `ast.parse` prior to disk writes.
 - **Stateful Failure Classification:**
   - `TEST_BUG`: Malformed payloads, assertion mistakes, or syntax issues $\rightarrow$ autonomously repaired via iterative LLM reflection (max 3 loops).
-  - `API_BUG`: Undocumented $500$ crashes, status code contract breaches, or silent data corruption $\rightarrow$ quarantined using `@pytest.mark.xfail(strict=True)` and exported to markdown bug reports.
+  - `API_BUG`: Undocumented 500 crashes, status code contract breaches, or silent data corruption $\rightarrow$ quarantined using `@pytest.mark.xfail(strict=True)` and exported to markdown bug reports.
 
-```
+```text
                     ┌─────────────────────────┐
                     │      OpenAPI Spec       │
                     │   (Target FastAPI)      │
@@ -59,16 +59,24 @@ The agent ingests any target application's OpenAPI specification (`openapi.json`
 
 ## 📊 Benchmark Results (Local Model Execution)
 
-Evaluated against a benchmark FastAPI target running three deliberate server defects ($500$ KeyError crash, 204 contract violation, and silent price data corruption):
+Evaluated against a benchmark FastAPI target running deliberate server defects (unhandled 500 server crash, status code contract violations, and silent price mutation):
 
 | Metric | Target / Result |
 | :--- | :--- |
 | **Orchestrator** | LangGraph Stateful Cyclic Graph |
 | **Model** | Local `qwen2.5-coder:7b` via Ollama (Zero cloud dependencies) |
-| **Zero-Shot Pass Rate** | **41.4%** (12 / 29 passed) |
-| **Post-Healing Pass Rate** | **82.8%** (24 / 29 passed + isolated) |
-| **Planted API Defects Caught** | **2 / 2** ($500$ Server Crash + Silent Data Corruption) |
+| **Total Test Suite** | **34 Tests** (32 API Unit + 2 Playwright E2E) |
+| **Zero-Shot Pass Rate** | **64.7%** (22 / 34 passed on Iteration 0) |
+| **Post-Healing Pass Rate** | **88.2%** (30 / 34 passed or quarantined after 3 loops) |
+| **Planted API Defects Caught** | **2 / 2** (500 Server Crash + Silent Data Corruption) |
 | **Human Code Intervention** | **0 lines modified manually** |
+
+---
+
+## 🐛 Discovered Server Defects (`reports/bug_report.md`)
+
+1. **`POST /items/` (Silent Data Corruption):** Server accepts valid item creation payloads but silently resets the `price` field to `0.0` instead of the submitted price value.
+2. **`GET /items/{item_id}` (Unhandled Server Crash):** Missing resource lookups throw an unhandled server error resulting in `500 Internal Server Error` instead of a compliant `404 Not Found`.
 
 ---
 

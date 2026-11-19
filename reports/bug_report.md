@@ -1,6 +1,6 @@
 # API Bug Report
 
-Generated: 2026-11-16T14:41:15.433671
+Generated: 2026-11-19T10:29:20.208789
 
 ## Summary
 - Total API bugs caught: **2**
@@ -8,29 +8,23 @@ Generated: 2026-11-16T14:41:15.433671
 
 ## Detected Bugs
 
-### Bug #1: E2E User Journey
-- **Test:** `test_full_user_journey`
-- **Reason:** Server silently mutated/corrupted data
+### Bug #1: POST /items/
+- **Test:** `test_create_item_success`
+- **Reason:** Server accepted payload but returned mutated/corrupted data (price field reset to 0.0)
 - **Traceback excerpt:**
 ```
-N/A
+generated_tests\test_unit_endpoints.py:133: in test_create_item_success
+    assert response.json()["price"] == payload["price"]
+E   assert 0.0 == 10.99
 ```
 
-### Bug #2: E2E User Journey
-- **Test:** `test_swagger_smoke_test`
+### Bug #2: GET /items/{item_id}
+- **Test:** `test_get_item_not_found`
 - **Reason:** Server returned 500 Internal Server Error (unhandled server crash)
 - **Traceback excerpt:**
 ```
-generated_tests\test_e2e_playwright.py:80: in test_swagger_smoke_test
-    expect(page).to_have_title("Swagger UI")
-E   AssertionError: Page title expected to be 'Swagger UI'
-E   Actual value: Benchmark Target API - Swagger UI 
-E   Call log:
-E     - Expect "to_have_title" with timeout 5000ms
-E       13 × locator resolved to <html>…</html>
-E          - unexpected value "Benchmark Target API - Swagger UI"
-E   
-E   Aria snapshot:
-E   - img
-E   - heading "Benchmark Target API 1.0.0 OAS 3.1" [level=1]
+generated_tests\test_unit_endpoints.py:216: in test_get_item_not_found
+    assert response.status_code == 404
+E   assert 500 == 404
+E    +  where 500 = <Response [500 Internal Server Error]>.status_code
 ```

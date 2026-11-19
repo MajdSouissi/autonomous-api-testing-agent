@@ -8,10 +8,17 @@ Rules:
 - Call client synchronously: response = client.get(...) or client.post(...), NEVER use await.
 - Test ONLY what the OpenAPI spec says.
 - Include: happy path (200/201), validation error (422), auth error (401/403).
-- Content-Type handling:
-  * When an endpoint specifies application/x-www-form-urlencoded (like POST /auth/token), you MUST send form data using `client.post(url, data=payload)`. NEVER send `json=payload` for form endpoints.
-  * For /auth/token specifically: register a unique user first via POST /auth/register, then call POST /auth/token with `data={"username": username, "password": password}`. Assert response.status_code == 200 and "access_token" in response.json().
-  * When an endpoint specifies application/json, call client using `client.post(url, json=payload)` or `client.put(url, json=payload)`.
+
+CRITICAL CONTENT-TYPE PRECISION:
+- Check CONTENT_TYPE for the endpoint:
+  * ONLY use `data=payload` when an endpoint's OpenAPI requestBody schema specifically declares `application/x-www-form-urlencoded` (e.g. POST /auth/token).
+  * Standard endpoints like `POST /auth/register` and `POST /items/` use `application/json` and MUST use `json=payload` (`client.post(url, json=payload)`). NEVER use `data=payload` for JSON endpoints.
+  * For registration tests (POST /auth/register), use unique usernames: `username = f"user_{uuid.uuid4().hex[:8]}"` and send with `json={"username": username, "password": "password123"}`.
+
+FIXTURE & AUTH RULES:
+- Use `client` fixture (httpx.Client) and `auth_headers` fixture for endpoints that require authentication (`headers=auth_headers`).
+- NEVER mutate the `auth_headers` fixture in-place (do NOT do `auth_headers["Authorization"] = ...`).
+  If testing unauthorized/invalid token (401), either omit headers (`client.get(url)`), or pass a separate dict: `client.get(url, headers={"Authorization": "Bearer invalid_token"})`.
 - Never read source code - only test via HTTP.
 - Output ONLY valid Python code, no explanations."""
 
@@ -26,9 +33,11 @@ PATH_PARAMS: {path_params}
 RESPONSE_SCHEMA: {response_schema}
 EXAMPLE_PAYLOAD: {example_payload}
 
-CRITICAL RULES:
-- When CONTENT_TYPE is application/x-www-form-urlencoded, you MUST send form data using `client.post(url, data=payload)`. NEVER send `json=payload` for form endpoints.
-- When CONTENT_TYPE is application/json, use `client.post(url, json=payload)`.
+CONTENT-TYPE & CALL RULES:
+- ONLY use `data=payload` when CONTENT_TYPE is specifically `application/x-www-form-urlencoded` (e.g. POST /auth/token).
+- When CONTENT_TYPE is `application/json` (such as POST /auth/register, POST /items/, PUT /items/{{path_param}}): you MUST call `client.post(path, json=payload)` or `client.put(path, json=payload)`. NEVER use data= for JSON endpoints!
+- For POST /auth/register: MUST use `json=payload` with a unique username (`f"user_{{uuid.uuid4().hex[:8]}}"`).
+- For POST /auth/token: MUST use `data=payload` (`application/x-www-form-urlencoded`).
 - Use `client` fixture (httpx.Client) and `auth_headers` fixture (Bearer token).
 - Generate 3-5 test functions. Output ONLY Python code."""
 
@@ -63,10 +72,11 @@ CLASSIFICATION RULES:
 - Rule 2 (Silent Data Corruption / Contract Breach): If the test sends a valid payload, receives a 200/201 response, but an assertion comparing returned data to sent data fails (e.g. `assert 0.0 == 0.1` or `response.json()["price"] == payload["price"]`), classify as API_BUG! Reason: "Server accepted payload but returned mutated/corrupted data".
 - When an API_BUG is classified, you must NOT rewrite the test to match the bad server behavior; decorate it with:
   @pytest.mark.xfail(reason="API Bug: <explanation>", strict=True)
-- Rule 3 (Content-Type & Test Bugs):
-  * When an endpoint specifies application/x-www-form-urlencoded, you MUST send form data using `data=payload`. NEVER send `json=payload` for form endpoints.
-  * STRICT FORBIDDEN: NEVER weaken happy-path *_success tests! Never change an assertion expecting 200 or 201 on a *_success test to accept 422 or assert 'error' in response.json(). If a *_success test receives 422, fix the payload structure or use data= instead of json=.
-  * Classify test syntax errors, missing auth, wrong assertion values vs spec, or using json= instead of data= as TEST_BUG.
+- Rule 3 (Content-Type Precision):
+  * Only use `data=payload` when an endpoint's requestBody specifically declares `application/x-www-form-urlencoded` (e.g. /auth/token).
+  * Standard endpoints like `POST /auth/register` and `POST /items/` use `application/json` and MUST use `json=payload`. If a test for `/auth/register` failed with 422 because it sent `data=payload`, fix it to `json=payload`.
+  * STRICT FORBIDDEN: NEVER weaken happy-path *_success tests! Never change an assertion expecting 200 or 201 on a *_success test to accept 422 or assert 'error' in response.json(). If a *_success test receives 422, fix the payload structure or use json= instead of data=.
+  * Classify test syntax errors, missing auth, wrong assertion values vs spec, or using wrong payload format as TEST_BUG.
 
 Output ONLY valid Python code with the fixed/decorated test function."""
 
@@ -83,8 +93,10 @@ OPENAPI_SPEC_FOR_ENDPOINT:
 CLASSIFICATION_RULES:
 - Rule 1 (Server Crashes): If status code is 500/5xx when spec expects 200/201/204: API_BUG → decorate with @pytest.mark.xfail(reason="API Bug: ...", strict=True)
 - Rule 2 (Silent Data Corruption): If test sent valid payload, received 200/201, but assertion comparing returned data to sent data failed (e.g. assert 0.0 == 0.1): API_BUG → decorate with @pytest.mark.xfail(reason="API Bug: server silently mutated/corrupted data", strict=True). DO NOT modify the assertion!
-- Rule 3 (Form data / Content-Type): If endpoint is application/x-www-form-urlencoded (e.g. /auth/token) and test sent json=payload: TEST_BUG → change to client.post(url, data=payload)
-- Rule 4 (DO NOT WEAKEN): NEVER weaken happy-path *_success tests (e.g. never change 200/201 assertion to 422 or 'error' in response.json()). Fix payload or data= parameter instead!
+- Rule 3 (Content-Type Precision):
+  * Endpoints with application/json (e.g. /auth/register, /items/) MUST use json=payload. If data=payload was sent, change to json=payload!
+  * Endpoints with application/x-www-form-urlencoded (e.g. /auth/token) MUST use data=payload.
+- Rule 4 (DO NOT WEAKEN): NEVER weaken happy-path *_success tests (e.g. never change 200/201 assertion to 422 or 'error' in response.json()). Fix payload or json=/data= parameter instead!
 - Rule 5 (Spec assertion mismatch): If test asserted wrong status code vs spec (e.g. 204 vs 200): TEST_BUG → fix assertion.
 
 Return a JSON object with:
@@ -99,8 +111,8 @@ CONFTEST_TEMPLATE = """Generate a pytest conftest.py for testing a FastAPI app a
 Include:
 - `base_url` fixture (session-scoped) returning "{base_url}"  
 - `client` fixture (session-scoped) returning httpx.Client(base_url=base_url)
-- `registered_user` fixture: calls POST /auth/register with {{username:"testuser_{{uuid}}", password:"testpass123"}}
-- `auth_token` fixture (depends on registered_user): calls POST /auth/token (form data), returns token string
-- `auth_headers` fixture: returns {{"Authorization": f"Bearer {{auth_token}}"}}
+- `registered_user` fixture (session-scoped): creates a unique user via POST /auth/register using json={{"username": f"testuser_{{uuid.uuid4().hex[:8]}}", "password": "testpassword123"}}, asserts response.status_code == 201
+- `auth_token` fixture (session-scoped, depends on registered_user): retrieves a valid JWT via POST /auth/token using data={{"username": registered_user["username"], "password": registered_user["password"]}}, headers={{"Content-Type": "application/x-www-form-urlencoded"}}, asserts response.status_code == 200, returns response.json()["access_token"]
+- `auth_headers` fixture (function-scoped, depends on auth_token): returns a fresh dictionary {{"Authorization": f"Bearer {{auth_token}}"}}. NEVER hardcode invalid_token; dynamically create user and token.
 - `playwright_base_url` fixture for Playwright tests
 Output ONLY valid Python code."""

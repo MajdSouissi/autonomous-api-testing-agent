@@ -10,7 +10,11 @@ from typing import Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError, jwt
+try:
+    from jose import JWTError, jwt
+except ImportError:
+    import jwt
+    from jwt.exceptions import PyJWTError as JWTError
 
 from benchmark_app.models import (
     ItemCreate,

@@ -96,6 +96,7 @@ def _run_local(timeout: int = 120) -> Dict[str, Any]:
         [
             "pytest",
             str(GENERATED_TESTS_DIR),
+            "-p", "no:asyncio",
             "--tb=short",
             "--json-report",
             f"--json-report-file={report_path}",
@@ -142,11 +143,15 @@ def _parse_json_report(report_path: Path, raw_output: str) -> Dict[str, Any]:
             "skipped": "skipped",
         }.get(outcome, outcome)
         
-        # Get traceback
+        # Get traceback (check call, then setup, then teardown; keep tail with actual error/assertion)
         traceback = ""
-        call_info = test.get("call", {})
-        if call_info.get("longrepr"):
-            traceback = str(call_info["longrepr"])[:2000]
+        for phase in ("call", "setup", "teardown"):
+            phase_info = test.get(phase, {})
+            if phase_info and phase_info.get("longrepr"):
+                raw_tb = str(phase_info["longrepr"])
+                tb_lines = raw_tb.strip().splitlines()
+                traceback = "\n".join(tb_lines[-25:]) if len(tb_lines) > 25 else raw_tb
+                break
         
         # Get test source (for healing context)
         test_source = _get_test_source(test.get("nodeid", ""))
@@ -267,28 +272,51 @@ def _get_test_source(nodeid: str) -> str:
         source = file_path.read_text(encoding="utf-8")
         func_name = parts[-1]
         import re
-        pattern = rf"(?m)^([ \t]*)(?:@(?:[^\n]+\n[ \t]*)*)?(?:async\s+)?def\s+{re.escape(func_name)}\b"
-        match = re.search(pattern, source)
-        if match:
-            start_idx = match.start()
-            base_indent_len = len(match.group(1))
-            lines = source[start_idx:].splitlines(keepends=True)
-            in_sig = True
-            consumed = 0
-            for line in lines:
-                consumed += len(line)
-                if in_sig:
-                    if ":" in line:
-                        in_sig = False
-                    continue
-                if not line.strip():
-                    continue
-                line_indent = len(line) - len(line.lstrip(" \t"))
-                if line_indent <= base_indent_len:
-                    consumed -= len(line)
-                    break
-            return source[start_idx:start_idx + consumed][:1500]
-        return source[:500]
+        all_lines = source.splitlines(keepends=True)
+
+        # Step 1: find the def line with a safe per-line match (no body regex)
+        def_line_idx = None
+        for i, line in enumerate(all_lines):
+            if re.match(rf"(?:async\s+)?def\s+{re.escape(func_name)}\s*\(", line.lstrip()):
+                def_line_idx = i
+                break
+        if def_line_idx is None:
+            return source[:500]
+
+        base_indent_len = len(all_lines[def_line_idx]) - len(all_lines[def_line_idx].lstrip(" \t"))
+
+        # Step 2: walk backwards to include decorator lines at the same indent
+        start_line_idx = def_line_idx
+        for i in range(def_line_idx - 1, -1, -1):
+            s = all_lines[i].strip()
+            cur_indent = len(all_lines[i]) - len(all_lines[i].lstrip(" \t"))
+            if s.startswith("@") and cur_indent == base_indent_len:
+                start_line_idx = i
+            elif s == "":
+                break
+            else:
+                break
+
+        # Step 3: walk forward past the signature then past the body
+        in_sig = True
+        end_line_idx = def_line_idx + 1
+        for i in range(def_line_idx, len(all_lines)):
+            end_line_idx = i + 1
+            if in_sig:
+                stripped_sig = all_lines[i].strip()
+                if stripped_sig and ":" in stripped_sig and not stripped_sig.startswith("#"):
+                    in_sig = False
+                continue
+            s = all_lines[i].strip()
+            if not s:
+                continue
+            line_indent = len(all_lines[i]) - len(all_lines[i].lstrip(" \t"))
+            if line_indent <= base_indent_len:
+                end_line_idx = i
+                break
+
+        extracted = "".join(all_lines[start_line_idx:end_line_idx])
+        return extracted[:1500]
     except Exception:
         return ""
 

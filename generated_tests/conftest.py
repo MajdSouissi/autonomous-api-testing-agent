@@ -34,7 +34,7 @@ def auth_token(client: httpx.Client, registered_user: dict) -> str:
     assert response.status_code == 200, f"Login failed: {response.status_code} {response.text}"
     return response.json()["access_token"]
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def auth_headers(auth_token: str) -> dict:
     return {"Authorization": f"Bearer {auth_token}"}
 

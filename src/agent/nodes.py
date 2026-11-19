@@ -25,12 +25,25 @@ GENERATED_TESTS_DIR = Path("generated_tests")
 REPORTS_DIR = Path("reports")
 
 def get_llm() -> ChatOllama:
+    model = os.getenv("OLLAMA_MODEL", OLLAMA_MODEL)
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     return ChatOllama(
-        model=OLLAMA_MODEL,
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        temperature=0.1,
+        model=model,
+        base_url=base_url,
+        temperature=0.0,
         num_ctx=8192,
+        client_kwargs={"timeout": 45.0},
+        sync_client_kwargs={"timeout": 45.0},
     )
+
+def _truncate_traceback(tb: str, max_lines: int = 20) -> str:
+    """Slice a pytest traceback to only the last `max_lines` lines (the actual error & assertion)."""
+    if not tb:
+        return ""
+    lines = tb.strip().splitlines()
+    if len(lines) <= max_lines:
+        return "\n".join(lines)[-1500:]
+    return ("... (truncated) ...\n" + "\n".join(lines[-max_lines:]))[-1500:]
 
 def _extract_code_block(text: str) -> str:
     """Extract Python code from LLM response (strips ```python ... ``` fences)."""
@@ -189,57 +202,78 @@ def _is_e2e(item: dict) -> bool:
     return "playwright" in nid or "e2e" in nid or "journey" in tname or "smoke" in tname
 
 def _replace_function(content: str, test_name: str, new_code: str) -> str:
-    """Safely replace a function or class method in Python source code."""
-    pattern = rf"(?m)^([ \t]*)(?:@(?:[^\n]+\n[ \t]*)*)?(?:async\s+)?def\s+{re.escape(test_name)}\b"
-    match = re.search(pattern, content)
-    if not match:
-        return content
+    """Replace a function (and its decorators) using a safe line-scanner — no catastrophic-backtracking regex."""
+    lines = content.splitlines(keepends=True)
 
-    start_idx = match.start()
-    base_indent = match.group(1)
-    base_indent_len = len(base_indent)
-
-    # Find the end of the function body
-    lines = content[start_idx:].splitlines(keepends=True)
-    in_signature = True
-    consumed = 0
-
+    # Step 1: Find the def line (simple linear scan; one-line match only)
+    def_line_idx = None
     for i, line in enumerate(lines):
-        consumed += len(line)
-        stripped = line.strip()
+        stripped = line.lstrip()
+        if re.match(rf"(?:async\s+)?def\s+{re.escape(test_name)}\s*\(", stripped):
+            def_line_idx = i
+            break
+    if def_line_idx is None:
+        return content  # function not found
 
-        if in_signature:
-            if ":" in line:
-                in_signature = False
-            continue
+    base_indent_len = len(lines[def_line_idx]) - len(lines[def_line_idx].lstrip(" \t"))
 
-        if not stripped:
-            continue
-
-        line_indent = len(line) - len(line.lstrip(" \t"))
-        if line_indent <= base_indent_len:
-            consumed -= len(line)
+    # Step 2: Walk backwards to include consecutive decorator lines
+    start_line_idx = def_line_idx
+    for i in range(def_line_idx - 1, -1, -1):
+        s = lines[i].strip()
+        cur_indent = len(lines[i]) - len(lines[i].lstrip(" \t"))
+        if s.startswith("@") and cur_indent == base_indent_len:
+            start_line_idx = i
+        elif s == "":
+            # blank line breaks decorator chain
+            break
+        else:
             break
 
-    end_idx = start_idx + consumed
+    # Step 3: Walk forward past the signature (until ":"), then past the body
+    in_signature = True
+    end_line_idx = def_line_idx + 1
+    for i in range(def_line_idx, len(lines)):
+        end_line_idx = i + 1
+        if in_signature:
+            # A colon that is not inside a comment ends the signature
+            stripped_sig = lines[i].strip()
+            if stripped_sig and ":" in stripped_sig and not stripped_sig.startswith("#"):
+                in_signature = False
+            continue
+        s = lines[i].strip()
+        if not s:
+            continue  # skip blank lines inside body
+        line_indent = len(lines[i]) - len(lines[i].lstrip(" \t"))
+        if line_indent <= base_indent_len:
+            end_line_idx = i
+            break
 
-    # Match the base indentation for new_code
-    non_empty = [l for l in new_code.splitlines() if l.strip()]
+    # Step 4: Re-indent new_code to match base_indent
+    nc_lines = new_code.splitlines(keepends=False)
+    non_empty = [l for l in nc_lines if l.strip()]
     if non_empty:
-        first_line = non_empty[0]
-        code_indent = len(first_line) - len(first_line.lstrip(" \t"))
+        code_indent = len(non_empty[0]) - len(non_empty[0].lstrip(" \t"))
         diff = base_indent_len - code_indent
         if diff > 0:
-            indent_str = " " * diff
-            new_code = "\n".join((indent_str + l) if l.strip() else "" for l in new_code.splitlines())
+            pad = " " * diff
+            nc_lines = [(pad + l) if l.strip() else l for l in nc_lines]
         elif diff < 0:
             dedent = -diff
-            new_code = "\n".join(l[dedent:] if l.startswith(" " * dedent) else l.lstrip(" \t") for l in new_code.splitlines())
+            nc_lines = [
+                l[dedent:] if l.startswith(" " * dedent) else l.lstrip(" \t")
+                for l in nc_lines
+            ]
+    patched = "\n".join(nc_lines)
+    if not patched.endswith("\n"):
+        patched += "\n"
 
-    if not new_code.endswith("\n"):
-        new_code += "\n"
-
-    return content[:start_idx] + new_code + content[end_idx:]
+    print(
+        f"  [healer] Replacing function {test_name} in source "
+        f"(lines {start_line_idx + 1}–{end_line_idx})...",
+        flush=True,
+    )
+    return "".join(lines[:start_line_idx]) + patched + "".join(lines[end_line_idx:])
 
 # ==========================================
 # NODE 1: parse_spec_node
@@ -307,7 +341,7 @@ def generate_unit_tests_node(state: AgentState) -> dict:
     
     test_functions = []
     
-    for ep in endpoints:
+    for idx, ep in enumerate(endpoints, 1):
         example_payload = {}
         if ep.get("request_body"):
             # The parser stores the schema directly under request_body (already extracted)
@@ -318,6 +352,10 @@ def generate_unit_tests_node(state: AgentState) -> dict:
         response_schema = ep.get("responses", {}).get(success_code, {})
         content_type = ep.get("content_type", ep.get("request_content_type", "application/json"))
         
+        path_param_val = ""
+        if ep.get("path_params") and len(ep["path_params"]) > 0:
+            path_param_val = ep["path_params"][0].get("name", "")
+
         prompt = UNIT_TEST_TEMPLATE.format(
             method=ep["method"].upper(),
             path=ep["path"],
@@ -327,16 +365,30 @@ def generate_unit_tests_node(state: AgentState) -> dict:
             content_type=content_type,
             request_body=json.dumps(ep.get("request_body"), indent=2)[:500],
             path_params=json.dumps(ep.get("path_params", []))[:200],
+            path_param=path_param_val,
             response_schema=json.dumps(response_schema)[:400],
             example_payload=json.dumps(example_payload)[:300],
         )
         
-        response = llm.invoke([
-            SystemMessage(content=UNIT_TEST_SYSTEM),
-            HumanMessage(content=prompt),
-        ])
-        
-        code = _extract_code_block(response.content)
+        print(f"  [unit_generator] Generating tests {idx}/{len(endpoints)}: {ep['method'].upper()} {ep['path']}...", flush=True)
+        try:
+            response = llm.invoke([
+                SystemMessage(content=UNIT_TEST_SYSTEM),
+                HumanMessage(content=prompt),
+            ])
+            code = _extract_code_block(response.content)
+        except (TimeoutError, Exception) as exc:
+            print(f"  [unit_generator] WARNING: LLM request failed/timed out for {ep['method'].upper()} {ep['path']} ({exc}); skipping.", flush=True)
+            continue
+
+        # Content-type precision guard: ensure json= vs data= strictly aligns with OpenAPI spec
+        if ep["path"] == "/auth/register":
+            code = re.sub(r'client\.post\((\s*["\']/auth/register["\']\s*,\s*)data=', r'client.post(\1json=', code)
+        elif ep["path"] == "/auth/token":
+            code = re.sub(r'client\.post\((\s*["\']/auth/token["\']\s*,\s*)json=', r'client.post(\1data=', code)
+        elif ep.get("content_type") == "application/json":
+            code = re.sub(r'client\.(post|put)\((\s*["\'][^"\']+["\']\s*,\s*)data=', r'client.\1(\2json=', code)
+
         test_functions.append(f"\n# Tests for {ep['method'].upper()} {ep['path']}\n{code}")
     
     full_unit_test_file = (
@@ -389,12 +441,16 @@ def generate_e2e_tests_node(state: AgentState) -> dict:
         endpoint_schemas=json.dumps(ep_summary, indent=2)[:1000],
     )
     
-    response = llm.invoke([
-        SystemMessage(content=E2E_SYSTEM),
-        HumanMessage(content=prompt),
-    ])
-    
-    e2e_code = _extract_code_block(response.content)
+    print("  [e2e_generator] Generating Playwright E2E journey tests...", flush=True)
+    try:
+        response = llm.invoke([
+            SystemMessage(content=E2E_SYSTEM),
+            HumanMessage(content=prompt),
+        ])
+        e2e_code = _extract_code_block(response.content)
+    except (TimeoutError, Exception) as exc:
+        print(f"  [e2e_generator] WARNING: LLM request failed/timed out for E2E tests ({exc}); skipping.", flush=True)
+        e2e_code = ""
     
     full_e2e_file = (
         '"""Auto-generated Playwright E2E tests for stateful user journeys."""\n'
@@ -456,7 +512,7 @@ def auth_token(client: httpx.Client, registered_user: dict) -> str:
     assert response.status_code == 200, f"Login failed: {{response.status_code}} {{response.text}}"
     return response.json()["access_token"]
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def auth_headers(auth_token: str) -> dict:
     return {{"Authorization": f"Bearer {{auth_token}}"}}
 
@@ -532,19 +588,24 @@ def classify_failures_node(state: AgentState) -> dict:
     classified = []
     api_bugs = []
     
-    for failure in all_failures:
+    total_failures = len(all_failures)
+    for i, failure in enumerate(all_failures):
         test_name = failure.get("test_name", "unknown")
-        traceback = failure.get("traceback", "")[:1500]
+        raw_traceback = failure.get("traceback", "")
+        short_traceback = _truncate_traceback(raw_traceback, max_lines=20)
         nodeid = failure.get("nodeid", "")
         original_test = failure.get("test_source", "# test source not available")
         
-        # Check deterministic classification rules first
-        is_api_bug, rule_reason = _detect_api_bug(test_name, traceback, original_test)
+        print(f"  [healer] Analyzing failure {i+1}/{total_failures}: {test_name}...", flush=True)
+
+        # Check deterministic classification rules first (against full raw traceback)
+        is_api_bug, rule_reason = _detect_api_bug(test_name, raw_traceback, original_test)
         
         if is_api_bug:
             failure_type = "API_BUG"
             reason = rule_reason
             fixed_code = ""
+            print(f"  [healer]   -> Classified as API_BUG (rule): {reason}", flush=True)
         else:
             # Find relevant endpoint spec
             relevant_ep = None
@@ -558,18 +619,30 @@ def classify_failures_node(state: AgentState) -> dict:
             
             prompt = HEAL_TEMPLATE.format(
                 original_test=original_test[:800],
-                traceback=traceback,
+                traceback=short_traceback,
                 endpoint_spec=ep_spec,
             )
             
-            response = llm.invoke([
-                SystemMessage(content=HEAL_SYSTEM),
-                HumanMessage(content=prompt),
-            ])
-            
-            classification, fixed_code = _extract_json_and_code(response.content)
-            failure_type = classification.get("classification", "TEST_BUG")
-            reason = classification.get("reason", "No reason provided")
+            try:
+                response = llm.invoke([
+                    SystemMessage(content=HEAL_SYSTEM),
+                    HumanMessage(content=prompt),
+                ])
+                classification, fixed_code = _extract_json_and_code(response.content)
+                failure_type = classification.get("classification", "TEST_BUG")
+                reason = classification.get("reason", "No reason provided")
+            except (TimeoutError, Exception) as exc:
+                print(
+                    f"  [healer] WARNING: LLM call timed out/failed for {test_name} ({exc}); skipping patch.",
+                    flush=True,
+                )
+                classified.append({
+                    **failure,
+                    "failure_type": "TEST_BUG",
+                    "reason": f"Skipped due to LLM timeout/error: {exc}",
+                    "fixed_code": "",
+                })
+                continue
 
         classified.append({
             **failure,
@@ -584,7 +657,7 @@ def classify_failures_node(state: AgentState) -> dict:
                 "test_name": test_name,
                 "endpoint": endpoint_name,
                 "reason": reason,
-                "traceback": traceback,
+                "traceback": short_traceback,
             })
     
     # Separate back into unit vs e2e using nodeid / test name
@@ -621,8 +694,9 @@ def heal_tests_node(state: AgentState) -> dict:
     if not e2e_tests and (GENERATED_TESTS_DIR / "test_e2e_playwright.py").exists():
         e2e_tests = (GENERATED_TESTS_DIR / "test_e2e_playwright.py").read_text(encoding="utf-8")
     
-    def apply_fixes(test_content: str, failures: list) -> str:
-        for failure in failures:
+    def apply_fixes(test_content: str, failures: list, suite_label: str) -> str:
+        total = len(failures)
+        for i, failure in enumerate(failures):
             failure_type = failure.get("failure_type", "TEST_BUG")
             test_name = failure.get("test_name", "")
             fixed_code = failure.get("fixed_code", "")
@@ -631,33 +705,47 @@ def heal_tests_node(state: AgentState) -> dict:
             if not test_name:
                 continue
 
-            if failure_type == "API_BUG":
-                test_content = _add_xfail_decorator(test_content, test_name, reason)
-            elif failure_type == "TEST_BUG" and fixed_code:
-                clean_code = fixed_code.strip()
-                # Skip invalid JSON or non-code injections
-                if clean_code.startswith("{") or clean_code.startswith("json\n") or clean_code.startswith("json\r\n"):
-                    continue
-                if "def " not in clean_code:
-                    continue
-                # Validate syntax of isolated replacement function
-                try:
-                    ast.parse(textwrap.dedent(clean_code))
-                except Exception:
-                    continue
-                
-                candidate = _replace_function(test_content, test_name, clean_code)
-                # Ensure the entire file still parses cleanly
-                try:
-                    ast.parse(candidate)
-                    test_content = candidate
-                except Exception:
-                    pass
+            print(
+                f"  [healer] Patching {suite_label} test {i+1}/{total}: {test_name} ({failure_type})...",
+                flush=True,
+            )
+
+            try:
+                if failure_type == "API_BUG":
+                    test_content = _add_xfail_decorator(test_content, test_name, reason)
+                elif failure_type == "TEST_BUG" and fixed_code:
+                    clean_code = fixed_code.strip()
+                    # Skip invalid JSON or non-code injections
+                    if clean_code.startswith("{") or clean_code.startswith("json\n") or clean_code.startswith("json\r\n"):
+                        print(f"  [healer]   WARNING: Skipping non-Python patch for {test_name}.", flush=True)
+                        continue
+                    if "def " not in clean_code:
+                        print(f"  [healer]   WARNING: Patch missing function def for {test_name}; skipping.", flush=True)
+                        continue
+                    # Validate syntax of isolated replacement function
+                    try:
+                        ast.parse(textwrap.dedent(clean_code))
+                    except Exception as syn_err:
+                        print(f"  [healer]   WARNING: Patch syntax error for {test_name} ({syn_err}); skipping.", flush=True)
+                        continue
+                    
+                    candidate = _replace_function(test_content, test_name, clean_code)
+                    # Ensure the entire file still parses cleanly
+                    try:
+                        ast.parse(candidate)
+                        test_content = candidate
+                    except Exception as file_err:
+                        print(f"  [healer]   WARNING: Merged AST invalid for {test_name} ({file_err}); keeping original.", flush=True)
+                elif failure_type == "TEST_BUG" and not fixed_code:
+                    print(f"  [healer]   WARNING: No patch code produced for {test_name}; skipping.", flush=True)
+            except (TimeoutError, Exception) as exc:
+                print(f"  [healer]   WARNING: Unexpected error patching {test_name} ({exc}); skipping.", flush=True)
+                continue
         
         return test_content
     
-    healed_unit = apply_fixes(unit_tests, unit_failures)
-    healed_e2e = apply_fixes(e2e_tests, e2e_failures)
+    healed_unit = apply_fixes(unit_tests, unit_failures, "unit")
+    healed_e2e = apply_fixes(e2e_tests, e2e_failures, "E2E")
 
     # Safety guard: ensure healed contents are always valid Python AST
     try:

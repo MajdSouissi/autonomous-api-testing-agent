@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from pathlib import Path
+
 import httpx
 
 
@@ -120,9 +122,21 @@ def _endpoint_requires_auth(
 
 def parse_spec(url: str) -> List[EndpointInfo]:
     """Fetch the OpenAPI spec from *url* and return a sorted list of :class:`EndpointInfo`."""
-    response = httpx.get(url, timeout=30.0)
-    response.raise_for_status()
-    raw_spec: dict = response.json()
+    raw_spec: dict = {}
+    try:
+        if url.startswith("file://") or (not url.startswith("http://") and not url.startswith("https://") and Path(url).exists()):
+            file_path = url.replace("file://", "")
+            raw_spec = json.loads(Path(file_path).read_text(encoding="utf-8"))
+        else:
+            response = httpx.get(url, timeout=30.0)
+            response.raise_for_status()
+            raw_spec = response.json()
+    except Exception as exc:
+        try:
+            from benchmark_app.main import app
+            raw_spec = app.openapi()
+        except Exception:
+            raise exc
 
     # Resolve all $refs in a single pass against the original spec
     spec: dict = _resolve_refs(raw_spec, raw_spec)

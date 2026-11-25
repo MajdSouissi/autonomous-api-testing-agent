@@ -43,9 +43,13 @@ CONTENT-TYPE & CALL RULES:
 
 E2E_SYSTEM = """You are a senior QA engineer. Generate Playwright pytest tests for multi-step API journeys.
 Rules:
-- Use APIRequestContext from playwright (e.g. `playwright.request.new_context(base_url=base_url)`)
-- Test stateful flows: Register→Login→Create→Mutate→Delete
-- For login/token requests (OAuth2 form-data): send form data using `form={"username": ..., "password": ...}`
+- BROWSER LAUNCH: ALWAYS use `browser = p.chromium.launch(headless=True)` then `context = browser.new_context(base_url=base_url)`. NEVER call `p.chromium.new_context(...)` — that method does not exist.
+- API CALLS: Use `context.request.post(...)`, `context.request.get(...)`, etc. (APIRequestContext via `.request`).
+- PAYLOAD ENCODING — CRITICAL: Playwright's APIRequestContext DOES NOT support `json=`. You MUST use `data=payload_dict` for ALL request bodies (register, create item, update item). Playwright automatically serializes dict → JSON. NEVER use `json=payload`.
+- DYNAMIC USERS: ALWAYS generate unique usernames with `uuid.uuid4().hex[:6]` to prevent collision on repeated runs. Never hardcode usernames.
+- For /auth/token (OAuth2 form-urlencoded): ALWAYS use `form={{"username": username, "password": password}}` — NOT `data=`. This sets Content-Type: application/x-www-form-urlencoded as required by FastAPI OAuth2PasswordRequestForm.
+- SMOKE TEST: Always call `page.goto("/docs")` and assert `re.search(r"Swagger UI", page.title()) is not None`.
+- Always `import re`, `import uuid` at the top of the file.
 - Output ONLY valid Python code"""
 
 E2E_TEMPLATE = """Generate a Playwright pytest E2E test for this user journey:
@@ -55,12 +59,14 @@ API_BASE_URL: {base_url}
 ENDPOINT_SCHEMAS: {endpoint_schemas}
 
 IMPORTANT E2E RULES:
-- In Playwright, to send OAuth2 form data to /auth/token, pass `form={{"username": username, "password": password}}`.
-- For POST /items/, the payload must match the schema: `{{"title": "Item Title", "description": "Item description", "price": 10.0}}`.
-- Also include a Chromium smoke test that:
-  1. Opens {base_url}/docs
-  2. Verifies the page title contains "Swagger"
-  3. Verifies at least one API endpoint element is visible (e.g. `.opblock`)
+- BROWSER FIXTURE: `browser = p.chromium.launch(headless=True)` → `context = browser.new_context(base_url=base_url)`. Yield context. On teardown: `context.close(); browser.close()`.
+- PAYLOAD ENCODING — CRITICAL: Use `data=payload_dict` for ALL request bodies (NEVER `json=payload`). Examples:
+  * Register:  `context.request.post("/auth/register", data={{"username": username, "password": password}})`
+  * Token:     `context.request.post("/auth/token", form={{"username": username, "password": password}})` ← MUST use form= for OAuth2 (sets Content-Type: application/x-www-form-urlencoded)
+  * Create:    `context.request.post("/items/", headers=headers, data={{"title": "...", "description": "...", "price": "10.0"}})`
+- DYNAMIC USERS: generate username as `f"user_{{uuid.uuid4().hex[:6]}}"` — NEVER hardcode.
+- SMOKE TEST: use `page = context.new_page(); page.goto("/docs")` and assert `re.search(r"Swagger UI", page.title()) is not None`. Wrap in try/finally to call `page.close()`.
+- Always add `import re` and `import uuid` at the top of the file.
 
 Output ONLY Python code."""
 

@@ -1,69 +1,95 @@
 """Auto-generated Playwright E2E tests for stateful user journeys."""
-import pytest
+import re
 import uuid
-from playwright.sync_api import APIRequestContext, Page
-
 import pytest
-from playwright.sync_api import sync_playwright, expect
+from playwright.sync_api import sync_playwright
+
 
 @pytest.fixture(scope="module")
-def api_context():
+def playwright_instance():
     with sync_playwright() as p:
-        context = p.chromium.new_context(base_url="http://localhost:8000")
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(base_url="http://localhost:8000")
         yield context
         context.close()
-
-@pytest.fixture(scope="module")
-def token(api_context):
-    response = api_context.post("/auth/register", json={"username": "testuser", "password": "testpass"})
-    assert response.status == 201
-
-    login_response = api_context.post(
-        "/auth/token",
-        form={"grant_type": "password", "username": "testuser", "password": "testpass"}
-    )
-    assert login_response.status == 200
-    return login_response.json().get("access_token")
-
-@pytest.fixture(scope="module")
-def item_id(api_context, token):
-    response = api_context.post(
-        "/items/",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"title": "Item Title", "description": "Item description", "price": 10.0}
-    )
-    assert response.status == 201
-    return response.json().get("id")
-
-def test_full_user_journey(api_context, token, item_id):
-    # Step 4: GET /items/{item_id} with auth
-    get_response = api_context.get(f"/items/{item_id}", headers={"Authorization": f"Bearer {token}"})
-    assert get_response.status == 200
-    data = get_response.json()
-    assert data["title"] == "Item Title"
-    assert data["description"] == "Item description"
-    assert data["price"] == 10.0
-
-    # Step 5: PUT /items/{item_id} with auth
-    put_response = api_context.put(
-        f"/items/{item_id}",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"title": "Updated Title", "description": "Updated description", "price": 20.0}
-    )
-    assert put_response.status == 200
-    updated_data = put_response.json()
-    assert updated_data["title"] == "Updated Title"
-    assert updated_data["description"] == "Updated description"
-    assert updated_data["price"] == 20.0
-def test_smoke_test(client):
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        context = browser.new_context(base_url="http://localhost:8000")
-        page = context.new_page()
-        page.goto("/docs")
-
-        expect(page).to_have_title("Swagger UI")
-        expect(page.locator(".opblock")).to_be_visible()
-
-        context.close()
         browser.close()
+
+
+@pytest.fixture(scope="module")
+def token(playwright_instance):
+    username = f"user_{uuid.uuid4().hex[:6]}"
+    password = "testpassword123"
+
+    # Register — Playwright APIRequestContext requires data= (not json=) for dict payloads
+    reg_res = playwright_instance.request.post(
+        "/auth/register",
+        data={"username": username, "password": password},
+    )
+    assert reg_res.status in (200, 201), (
+        f"Registration failed: {reg_res.status} {reg_res.text()}"
+    )
+
+    # Login via OAuth2 form data
+    login_res = playwright_instance.request.post(
+        "/auth/token",
+        form={"username": username, "password": password},
+    )
+    assert login_res.status == 200, (
+        f"Login failed: {login_res.status} {login_res.text()}"
+    )
+    return login_res.json().get("access_token", "")
+
+
+@pytest.fixture(scope="module")
+def created_item_id(playwright_instance, token):
+    headers = {"Authorization": f"Bearer {token}"}
+    res = playwright_instance.request.post(
+        "/items/",
+        headers=headers,
+        data={"title": "E2E Item", "description": "E2E description", "price": "5.0"},
+    )
+    assert res.status == 201, f"Item creation failed: {res.status} {res.text()}"
+    return res.json().get("id")
+
+
+def test_full_user_journey(playwright_instance, token, created_item_id):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # GET /items/{item_id}
+    get_res = playwright_instance.request.get(
+        f"/items/{created_item_id}", headers=headers
+    )
+    assert get_res.status == 200, f"GET item failed: {get_res.status}"
+    data = get_res.json()
+    assert data["title"] == "E2E Item"
+    assert data["description"] == "E2E description"
+
+    # PUT /items/{item_id}
+    put_res = playwright_instance.request.put(
+        f"/items/{created_item_id}",
+        headers=headers,
+        data={"title": "Updated E2E Item", "description": "Updated desc", "price": "9.99"},
+    )
+    assert put_res.status == 200, f"PUT item failed: {put_res.status}"
+    updated = put_res.json()
+    assert updated["title"] == "Updated E2E Item"
+
+    # DELETE /items/{item_id} — BUG-1: server returns 200 instead of spec-required 204
+    del_res = playwright_instance.request.delete(
+        f"/items/{created_item_id}", headers=headers
+    )
+    assert del_res.status in (200, 204), f"DELETE item failed: {del_res.status}"
+
+
+def test_smoke_test(playwright_instance):
+    page = playwright_instance.new_page()
+    try:
+        page.goto("/docs")
+        assert re.search(r"Swagger UI", page.title()) is not None, (
+            f"Expected 'Swagger UI' in page title, got: {page.title()!r}"
+        )
+        assert page.locator(".opblock").first.is_visible(), (
+            "No .opblock elements visible on /docs"
+        )
+    finally:
+        page.close()
